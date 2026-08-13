@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Prove the fork supplied this workflow definition
-        run: echo FORK_WORKFLOW_EXPLOIT_DEFINITION_EXECUTED
+        run: echo FORK_WORKFLOW_CHANGED_AFTER_APPROVAL_AND_EXECUTED
 
       - name: Expected denial using the consumer job's own OIDC identity
         id: direct_auth
