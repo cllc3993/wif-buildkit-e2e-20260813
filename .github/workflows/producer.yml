@@ -1,0 +1,68 @@
+name: Trusted WIF cache producer
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+  id-token: write
+
+jobs:
+  publish-and-wait:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      GAR_HOST: us-central1-docker.pkg.dev
+      IMAGE: us-central1-docker.pkg.dev/bola-502903/wif-e2e-20260813/proof
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate trusted producer
+        id: auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: projects/687967349624/locations/global/workloadIdentityPools/wif-e2e-0813/providers/github
+          service_account: wif-e2e-publisher@bola-502903.iam.gserviceaccount.com
+          token_format: access_token
+
+      - name: Confirm generated credential exists without reading it
+        shell: bash
+        run: |
+          count=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -name 'gha-creds-*.json' -type f | wc -l)
+          test "$count" = 1
+          echo "generated_credential_count=$count"
+
+      - name: Authenticate Docker to the owned registry
+        shell: bash
+        run: |
+          printf '%s' '${{ steps.auth.outputs.access_token }}' \
+            | docker login -u oauth2accesstoken --password-stdin "$GAR_HOST"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Publish benign image and vulnerable max-mode cache
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: lab/Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:live
+            ${{ env.IMAGE }}:benign-${{ github.run_id }}
+          cache-to: type=gha,mode=max,scope=wif-e2e-${{ github.run_id }}
+
+      - name: Record baseline digest
+        shell: bash
+        run: |
+          echo "BASELINE_DIGEST=${{ steps.build.outputs.digest }}"
+          echo "The producer remains alive so the copied OIDC request bearer remains usable."
+
+      - name: Keep producer credential active for the cross-workflow proof
+        shell: bash
+        run: |
+          for minute in $(seq 1 25); do
+            echo "producer_alive_minute=$minute"
+            sleep 60
+          done

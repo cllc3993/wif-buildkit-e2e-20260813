@@ -1,0 +1,13 @@
+name: Base PR control
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  base-control:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo BASE_WORKFLOW_CONTROL_ONLY

@@ -1,0 +1,5 @@
+name: Export GHA cache runtime environment
+description: Exposes the runner-provided cache runtime variables to later lab steps.
+runs:
+  using: node20
+  main: index.js
