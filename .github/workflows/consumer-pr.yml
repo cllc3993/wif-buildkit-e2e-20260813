@@ -103,7 +103,7 @@ jobs:
           echo "REDEEMED_AS=$active"
           gcloud auth print-access-token \
             | docker login -u oauth2accesstoken --password-stdin "$GAR_HOST"
-          docker build -f attack/Dockerfile -t "$IMAGE:live" .
+          docker build -f attack/Dockerfile -t "$IMAGE:live" attack
           docker push "$IMAGE:live" | tee push-output.txt
           digest=$(sed -n 's/^live: digest: \([^ ]*\).*/\1/p' push-output.txt | tail -1)
           test -n "$digest"
